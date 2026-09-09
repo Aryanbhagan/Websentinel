@@ -6,6 +6,7 @@ from input_handler import (
 
 from risk_engine import classify_risk
 from web_checker import check_website
+from crawler import crawl_website, display_crawl_results
 
 
 def collect_basic_observations(target, web_data):
@@ -69,7 +70,6 @@ def collect_basic_observations(target, web_data):
             "score": 30
         })
 
-        # No HTTP request should be considered successful
         return observations
 
     # Server connection
@@ -150,7 +150,12 @@ def collect_basic_observations(target, web_data):
     return observations
 
 
-def display_results(target, observations, risk, web_data):
+def display_results(
+    target,
+    observations,
+    risk,
+    web_data
+):
     """Display the Phase 1 assessment."""
 
     print("\n" + "=" * 55)
@@ -285,10 +290,12 @@ def main():
     print("           Passive Web Security Platform")
     print("=" * 55)
 
-    # Get target
+    # -------------------------------------------------
+    # STEP 1: GET TARGET
+    # -------------------------------------------------
+
     url = get_target_url()
 
-    # Validate URL structure
     if not validate_url(url):
 
         print("\n[ERROR] Invalid URL.")
@@ -297,34 +304,71 @@ def main():
         )
         return
 
-    # Parse target
+    # -------------------------------------------------
+    # STEP 2: PARSE TARGET
+    # -------------------------------------------------
+
     target = parse_target(url)
 
     print("\nPerforming target assessment...")
 
-    # IMPORTANT:
-    # check_website() requires both the URL
-    # and the hostname for DNS resolution.
+    # -------------------------------------------------
+    # STEP 3: BASIC WEB CHECK
+    # -------------------------------------------------
+
     web_data = check_website(
         url,
         target["hostname"]
     )
 
-    # Collect observations
+    # -------------------------------------------------
+    # STEP 4: BASIC OBSERVATIONS
+    # -------------------------------------------------
+
     observations = collect_basic_observations(
         target,
         web_data
     )
 
-    # Calculate risk
-    risk = classify_risk(observations)
+    # -------------------------------------------------
+    # STEP 5: CURRENT RISK CALCULATION
+    # -------------------------------------------------
 
-    # Display complete results
+    risk = classify_risk(
+        observations
+    )
+
+    # -------------------------------------------------
+    # STEP 6: DISPLAY BASIC RESULTS
+    # -------------------------------------------------
+
     display_results(
         target,
         observations,
         risk,
         web_data
+    )
+
+    # -------------------------------------------------
+    # STEP 7: RUN HTML CRAWLER
+    # -------------------------------------------------
+
+    print("\n")
+    print("=" * 55)
+    print("Starting HTML crawler...")
+    print("=" * 55)
+
+    crawl_result = crawl_website(
+        url,
+        max_pages=20
+    )
+
+    # -------------------------------------------------
+    # STEP 8: DISPLAY CRAWLER RESULTS
+    # -------------------------------------------------
+
+    display_crawl_results(
+        crawl_result
     )
 
 
