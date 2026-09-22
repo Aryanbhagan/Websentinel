@@ -6,7 +6,16 @@ from input_handler import (
 
 from risk_engine import classify_risk
 from web_checker import check_website
-from crawler import crawl_website, display_crawl_results
+
+from crawler import (
+    crawl_website,
+    display_crawl_results
+)
+
+from security_analyzer import (
+    analyze_crawler_result,
+    display_security_analysis
+)
 
 
 def collect_basic_observations(target, web_data):
@@ -16,13 +25,16 @@ def collect_basic_observations(target, web_data):
 
     # HTTPS check
     if target["scheme"] == "https":
+
         observations.append({
             "name": "HTTPS",
             "status": "PASS",
             "description": "Target URL uses HTTPS.",
             "score": 0
         })
+
     else:
+
         observations.append({
             "name": "HTTPS",
             "status": "WARNING",
@@ -34,6 +46,7 @@ def collect_basic_observations(target, web_data):
 
     # Hostname format check
     if target["hostname"]:
+
         observations.append({
             "name": "Hostname Format",
             "status": "PASS",
@@ -163,7 +176,10 @@ def display_results(
     print("         Passive Web Security Foundation")
     print("=" * 55)
 
-    # Target information
+    # -------------------------------------------------
+    # TARGET INFORMATION
+    # -------------------------------------------------
+
     print("\nTARGET INFORMATION")
     print("-" * 55)
 
@@ -174,7 +190,10 @@ def display_results(
     if target["port"]:
         print(f"Port             : {target['port']}")
 
-    # Basic observations
+    # -------------------------------------------------
+    # BASIC OBSERVATIONS
+    # -------------------------------------------------
+
     print("\nBASIC OBSERVATIONS")
     print("-" * 55)
 
@@ -189,7 +208,10 @@ def display_results(
             f"  {observation['description']}"
         )
 
-    # DNS analysis
+    # -------------------------------------------------
+    # DNS ANALYSIS
+    # -------------------------------------------------
+
     print("\nDNS ANALYSIS")
     print("-" * 55)
 
@@ -199,7 +221,9 @@ def display_results(
 
         print(
             "IP Address(es)   : "
-            + ", ".join(web_data["ip_addresses"])
+            + ", ".join(
+                web_data["ip_addresses"]
+            )
         )
 
     else:
@@ -211,7 +235,10 @@ def display_results(
             f"{web_data['dns_error']}"
         )
 
-    # Server / HTTP analysis
+    # -------------------------------------------------
+    # SERVER / HTTP ANALYSIS
+    # -------------------------------------------------
+
     print("\nSERVER / HTTP ANALYSIS")
     print("-" * 55)
 
@@ -251,8 +278,11 @@ def display_results(
         )
 
         if web_data["page_available"]:
+
             print("Page Available    : YES")
+
         else:
+
             print("Page Available    : NO")
 
     else:
@@ -260,12 +290,16 @@ def display_results(
         print("Server Connection : NOT COMPLETED")
 
         if web_data["error"]:
+
             print(
                 f"Reason            : "
                 f"{web_data['error']}"
             )
 
-    # Risk summary
+    # -------------------------------------------------
+    # BASIC RISK SUMMARY
+    # -------------------------------------------------
+
     print("\nRISK SUMMARY")
     print("-" * 55)
 
@@ -290,57 +324,59 @@ def main():
     print("           Passive Web Security Platform")
     print("=" * 55)
 
-    # -------------------------------------------------
+    # =================================================
     # STEP 1: GET TARGET
-    # -------------------------------------------------
+    # =================================================
 
     url = get_target_url()
 
     if not validate_url(url):
 
         print("\n[ERROR] Invalid URL.")
+
         print(
             "Please enter a valid HTTP/HTTPS URL."
         )
+
         return
 
-    # -------------------------------------------------
+    # =================================================
     # STEP 2: PARSE TARGET
-    # -------------------------------------------------
+    # =================================================
 
     target = parse_target(url)
 
     print("\nPerforming target assessment...")
 
-    # -------------------------------------------------
+    # =================================================
     # STEP 3: BASIC WEB CHECK
-    # -------------------------------------------------
+    # =================================================
 
     web_data = check_website(
         url,
         target["hostname"]
     )
 
-    # -------------------------------------------------
+    # =================================================
     # STEP 4: BASIC OBSERVATIONS
-    # -------------------------------------------------
+    # =================================================
 
     observations = collect_basic_observations(
         target,
         web_data
     )
 
-    # -------------------------------------------------
-    # STEP 5: CURRENT RISK CALCULATION
-    # -------------------------------------------------
+    # =================================================
+    # STEP 5: CURRENT BASIC RISK
+    # =================================================
 
     risk = classify_risk(
         observations
     )
 
-    # -------------------------------------------------
+    # =================================================
     # STEP 6: DISPLAY BASIC RESULTS
-    # -------------------------------------------------
+    # =================================================
 
     display_results(
         target,
@@ -349,9 +385,9 @@ def main():
         web_data
     )
 
-    # -------------------------------------------------
-    # STEP 7: RUN HTML CRAWLER
-    # -------------------------------------------------
+    # =================================================
+    # STEP 7: START HTML CRAWLER
+    # =================================================
 
     print("\n")
     print("=" * 55)
@@ -363,12 +399,33 @@ def main():
         max_pages=20
     )
 
-    # -------------------------------------------------
+    # =================================================
     # STEP 8: DISPLAY CRAWLER RESULTS
-    # -------------------------------------------------
+    # =================================================
 
     display_crawl_results(
         crawl_result
+    )
+
+    # =================================================
+    # STEP 9: SECURITY ANALYSIS
+    # =================================================
+
+    print("\n")
+    print("=" * 55)
+    print("Starting security analysis...")
+    print("=" * 55)
+
+    security_analysis = analyze_crawler_result(
+        crawl_result
+    )
+
+    # =================================================
+    # STEP 10: DISPLAY SECURITY FINDINGS
+    # =================================================
+
+    display_security_analysis(
+        security_analysis
     )
 
 
