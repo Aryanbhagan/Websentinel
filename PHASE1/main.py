@@ -4,7 +4,7 @@ from input_handler import (
     parse_target
 )
 
-from risk_engine import classify_risk
+from risk_engine import classify_risk, calculate_risk
 from web_checker import check_website
 
 from crawler import (
@@ -421,7 +421,24 @@ def main():
     )
 
     # =================================================
-    # STEP 10: DISPLAY SECURITY FINDINGS
+    # STEP 10: FINAL RISK ASSESSMENT
+    # =================================================
+
+    if security_analysis.get("success"):
+        final_risk = calculate_risk(
+            security_analysis["findings"]
+        )
+
+        security_analysis["summary"]["risk_score"] = final_risk["score"]
+        security_analysis["summary"]["risk_level"] = final_risk["level"]
+        security_analysis["summary"]["high"] = final_risk["high"]
+        security_analysis["summary"]["medium"] = final_risk["medium"]
+        security_analysis["summary"]["low"] = final_risk["low"]
+        security_analysis["summary"]["informational"] = final_risk["informational"]
+        security_analysis["summary"]["total_findings"] = final_risk["finding_count"]
+
+    # =================================================
+    # STEP 11: DISPLAY SECURITY FINDINGS
     # =================================================
 
     display_security_analysis(
