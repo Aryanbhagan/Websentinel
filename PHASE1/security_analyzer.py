@@ -1,394 +1,1269 @@
-
 from datetime import datetime, timezone
 
-AUTH_WORDS = ("session", "sess", "sid", "auth", "token", "jwt", "access", "refresh")
 
+# ============================================================
+# FINDING CREATION
+# ============================================================
 
-def make_finding(name, category, severity, score, confidence,
-                 description, evidence, page=None, recommendation=""):
+def make_finding(
+    name,
+    category,
+    severity,
+    score,
+    confidence,
+    description,
+    evidence,
+    page,
+    recommendation
+):
+    """
+    Create a standardized security finding.
+
+    The Security Analyzer interprets crawler evidence.
+    It does not calculate the final website risk.
+    """
+
     return {
-        "name": name, "category": category, "severity": severity,
-        "score": score, "confidence": confidence,
-        "description": description, "evidence": evidence,
-        "page": page, "recommendation": recommendation
+        "name": name,
+        "category": category,
+        "severity": severity,
+        "score": score,
+        "confidence": confidence,
+        "description": description,
+        "evidence": evidence,
+        "page": page,
+        "recommendation": recommendation
     }
 
 
+# ============================================================
+# HELPER FUNCTIONS
+# ============================================================
+
 def is_html(page):
-    return "text/html" in (page.get("content_type") or "").lower()
+    content_type = str(
+        page.get("content_type", "")
+    ).lower()
+
+    return (
+        "text/html" in content_type
+        or content_type == ""
+    )
 
 
-def auth_cookie(name):
-    name = (name or "").lower()
-    return any(word in name for word in AUTH_WORDS)
+def auth_cookie(cookie):
+    """
+    Identify cookies that appear to be authentication,
+    session, or security-related cookies.
+    """
+
+    if isinstance(cookie, str):
+        name = cookie.lower()
+    else:
+        name = str(
+            cookie.get("name", "")
+        ).lower()
+
+    keywords = (
+        "session",
+        "sess",
+        "auth",
+        "token",
+        "jwt",
+        "login",
+        "user",
+        "sid"
+    )
+
+    return any(
+        keyword in name
+        for keyword in keywords
+    )
 
 
 def hsts_max_age(value):
+    """
+    Extract max-age from a Strict-Transport-Security
+    header value.
+    """
+
     if not value:
         return None
+
+    value = str(value).lower()
+
     for part in value.split(";"):
-        if part.strip().lower().startswith("max-age="):
+        part = part.strip()
+
+        if part.startswith("max-age="):
             try:
-                return int(part.split("=", 1)[1].strip())
+                return int(
+                    part.split("=", 1)[1]
+                )
             except ValueError:
                 return None
+
     return None
 
 
-def has_frame_ancestors(page):
-    value = page.get("security_headers", {}).get(
-        "content_security_policy", {}
-    ).get("value")
-    return bool(value) and "frame-ancestors" in value.lower()
+def has_frame_ancestors(csp):
+    """
+    Check whether CSP contains frame-ancestors.
+    """
+
+    if not csp:
+        return False
+
+    return "frame-ancestors" in str(csp).lower()
 
 
-def add_transport(result, findings):
-    redirect = result.get("http_redirect")
-    if redirect and redirect.get("tested") and redirect.get("redirects_to_https") is False:
-        findings.append(make_finding(
-            "HTTP Not Redirected to HTTPS", "Transport Security", "MEDIUM", 20, "HIGH",
-            "The tested HTTP URL did not redirect to HTTPS.",
-            {"status_code": redirect.get("status_code"),
-             "location": redirect.get("location")},
-            recommendation="Redirect HTTP requests to HTTPS."
-        ))
+# ============================================================
+# TRANSPORT SECURITY
+# ============================================================
 
-    tls = result.get("tls") or {}
-    if tls.get("tls_version") in ("TLSv1", "TLSv1.1"):
-        findings.append(make_finding(
-            "Obsolete TLS Version", "Transport Security", "HIGH", 30, "HIGH",
-            f"The server negotiated {tls['tls_version']}.",
-            {"tls_version": tls["tls_version"]},
-            recommendation="Disable obsolete TLS versions."
-        ))
+def add_transport(findings, page):
+    """
+    Check whether an HTTP page is redirected to HTTPS.
+    """
 
-    if tls.get("certificate_valid") is False:
-        findings.append(make_finding(
-            "TLS Certificate Validation Failure", "Transport Security",
-            "HIGH", 30, "HIGH",
-            "The passive TLS check could not validate the certificate.",
-            {"error": tls.get("error")},
-            recommendation="Install and configure a valid TLS certificate."
-        ))
+    scheme = str(
+        page.get("scheme", "")
+    ).lower()
 
-    days = tls.get("days_until_expiry")
-    if isinstance(days, int) and days <= 30:
-        if days < 0:
-            severity, score, name = "HIGH", 30, "Expired TLS Certificate"
-        elif days <= 7:
-            severity, score, name = "MEDIUM", 15, "TLS Certificate Expiring Soon"
-        else:
-            severity, score, name = "LOW", 5, "TLS Certificate Nearing Expiry"
+    redirects = page.get(
+        "redirects",
+        []
+    )
 
-        findings.append(make_finding(
-            name, "Transport Security", severity, score, "HIGH",
-            f"The certificate has {days} days remaining.",
-            {"expires": tls.get("certificate_expires"), "days": days},
-            recommendation="Renew the certificate before expiry."
-        ))
+    final_url = str(
+        page.get("final_url", "")
+    ).lower()
 
+    page_url = str(
+        page.get("url", "")
+    ).lower()
 
-def add_hsts(result, findings):
-    pages = {
-        u: p for u, p in result.get("pages", {}).items()
-        if is_html(p) and p.get("https", {}).get("used") is True
-    }
-    if not pages:
+    if scheme != "http":
         return
 
-    missing, disabled = [], []
-    for url, page in pages.items():
-        header = page.get("security_headers", {}).get(
-            "strict_transport_security", {}
-        )
-        if not header.get("present"):
-            missing.append(url)
-        elif hsts_max_age(header.get("value")) == 0:
-            disabled.append(url)
+    redirected_to_https = (
+        "https://" in final_url
+        or "https" in str(redirects).lower()
+    )
 
-    if disabled:
-        findings.append(make_finding(
-            "HSTS Disabled", "Transport Security", "MEDIUM", 15, "HIGH",
-            "HSTS is present with max-age=0.",
-            {"pages": disabled[:20]},
-            recommendation="Use a suitable positive HSTS max-age."
-        ))
+    if not redirected_to_https:
 
-    if missing:
-        findings.append(make_finding(
-            "HSTS Missing", "Transport Security", "LOW", 5, "HIGH",
-            "HSTS is absent on some analyzed HTTPS pages. This is a "
-            "hardening gap, not proof of an exploitable vulnerability.",
-            {"missing": len(missing), "analyzed": len(pages)},
-            recommendation="Consider enabling HSTS after validating HTTPS."
-        ))
-
-
-def add_headers(result, findings):
-    pages = {
-        u: p for u, p in result.get("pages", {}).items() if is_html(p)
-    }
-    if not pages:
-        return
-
-    checks = {
-        "content_security_policy": "Content-Security-Policy",
-        "x_frame_options": "X-Frame-Options",
-        "x_content_type_options": "X-Content-Type-Options",
-        "referrer_policy": "Referrer-Policy",
-        "permissions_policy": "Permissions-Policy"
-    }
-
-    for field, label in checks.items():
-        missing = []
-        for url, page in pages.items():
-            present = page.get("security_headers", {}).get(field, {}).get("present")
-            if not present:
-                if field == "x_frame_options" and has_frame_ancestors(page):
-                    continue
-                missing.append(url)
-
-        if missing:
-            findings.append(make_finding(
-                f"{label} Missing", "Security Headers", "LOW", 5, "HIGH",
-                f"{label} is absent on {len(missing)} of {len(pages)} "
-                "HTML pages. This is a defense-in-depth weakness, not "
-                "proof of a vulnerability.",
-                {"missing": len(missing), "analyzed": len(pages)},
-                recommendation=f"Review whether {label} should be enabled."
-            ))
-
-
-def add_cookies(result, findings):
-    for url, page in result.get("pages", {}).items():
-        if not is_html(page):
-            continue
-        https = page.get("https", {}).get("used") is True
-
-        for cookie in page.get("cookies", []):
-            name = cookie.get("name") or "unnamed"
-            is_auth = auth_cookie(name)
-
-            if https and not cookie.get("secure"):
-                findings.append(make_finding(
-                    "Cookie Missing Secure Attribute", "Cookie Security",
-                    "MEDIUM" if is_auth else "LOW",
-                    15 if is_auth else 5, "HIGH",
-                    f"Cookie '{name}' was set from HTTPS without Secure.",
-                    {"cookie": name, "secure": cookie.get("secure")},
-                    url, "Set Secure on cookies that should only use HTTPS."
-                ))
-
-            if is_auth and not cookie.get("httponly"):
-                findings.append(make_finding(
-                    "Authentication Cookie Missing HttpOnly", "Cookie Security",
-                    "MEDIUM", 15, "MEDIUM",
-                    f"Cookie '{name}' appears related to session/authentication "
-                    "state and lacks HttpOnly.",
-                    {"cookie": name, "httponly": cookie.get("httponly")},
-                    url, "Use HttpOnly unless client-side access is required."
-                ))
-
-            if str(cookie.get("samesite") or "").lower() == "none" and not cookie.get("secure"):
-                findings.append(make_finding(
-                    "SameSite=None Without Secure", "Cookie Security",
-                    "MEDIUM", 15, "HIGH",
-                    f"Cookie '{name}' uses SameSite=None without Secure.",
-                    {"cookie": name},
-                    url, "Set Secure when using SameSite=None."
-                ))
-
-
-def add_forms(result, findings):
-    for url, page in result.get("pages", {}).items():
-        for form in page.get("forms", []):
-            if form.get("password_fields", 0) > 0 and not form.get("uses_https"):
-                findings.append(make_finding(
-                    "Password Form Uses Non-HTTPS Action",
-                    "Transport Security", "HIGH", 30, "HIGH",
-                    "A password form submits to a non-HTTPS action.",
-                    {"action": form.get("action"), "method": form.get("method")},
-                    url, "Submit authentication credentials only over HTTPS."
-                ))
-
-
-def add_mixed_content(result, findings):
-    for url, page in result.get("pages", {}).items():
-        mixed = page.get("mixed_content", {})
-        if mixed.get("detected"):
-            findings.append(make_finding(
-                "Mixed Content Reference", "Transport Security",
-                "LOW", 5, "HIGH",
-                "An HTTPS page references one or more HTTP resources.",
-                {"resources": mixed.get("resources", [])[:20]},
-                url, "Serve referenced resources over HTTPS."
-            ))
-
-
-def add_cors(result, findings):
-    for url, page in result.get("pages", {}).items():
-        cors = page.get("cors", {})
-        if not cors.get("present"):
-            continue
-
-        origin = (cors.get("allow_origin") or "").strip()
-        credentials = (cors.get("allow_credentials") or "").strip().lower()
-
-        # '*' with credentials is rejected by browsers; do not report
-        # it as a credentialed CORS vulnerability.
-        if origin == "*" and credentials == "true":
-            continue
-
-        if origin == "*":
-            findings.append(make_finding(
-                "Wildcard CORS Policy", "CORS", "INFO", 0, "HIGH",
-                "The response allows cross-origin access from any origin. "
-                "This is only a concern when the resource is private.",
-                {"allow_origin": origin}, url,
-                "Restrict CORS to required origins for private resources."
-            ))
-
-        elif origin.lower() == "null":
-            findings.append(make_finding(
-                "CORS Allows Null Origin", "CORS", "LOW", 5, "HIGH",
-                "The response explicitly allows the null origin.",
-                {"allow_origin": origin}, url,
-                "Allow only explicitly required origins."
-            ))
-
-
-def add_exposure(result, findings):
-    for url, page in result.get("pages", {}).items():
-        directory = page.get("directory_listing", {})
-        if directory.get("detected"):
-            findings.append(make_finding(
-                "Directory Listing Detected", "Information Exposure",
-                "MEDIUM", 15, "HIGH",
-                "The page contains directory-listing indicators.",
-                {"indicators": directory.get("indicators", [])},
-                url, "Disable directory indexing unless explicitly required."
-            ))
-
-        errors = page.get("error_indicators", {})
-        # The crawler's generic "warning:" pattern is intentionally ignored.
-        indicators = [x for x in errors.get("indicators", []) if x != "php warning"]
-
-        if indicators:
-            findings.append(make_finding(
-                "Verbose Error Information Detected",
-                "Information Exposure", "MEDIUM", 15, "MEDIUM",
-                "The response contains patterns associated with verbose errors.",
-                {"indicators": indicators}, url,
-                "Return generic errors to users and keep detailed traces in logs."
-            ))
-
-
-def add_information(result, findings):
-    for url, page in result.get("pages", {}).items():
-        server = page.get("server_information", {})
-        if server.get("x_powered_by") or server.get("technology_headers"):
-            findings.append(make_finding(
-                "Technology Information Disclosure",
-                "Information Disclosure", "INFO", 0, "HIGH",
-                "Server/framework information is exposed in response headers.",
-                {
-                    "server": server.get("server"),
-                    "x_powered_by": server.get("x_powered_by"),
-                    "technology_headers": server.get("technology_headers", {})
+        findings.append(
+            make_finding(
+                name="HTTP Without HTTPS Enforcement",
+                category="Transport Security",
+                severity="MEDIUM",
+                score=20,
+                confidence="HIGH",
+                description=(
+                    "The crawler observed an HTTP page that "
+                    "was not redirected to HTTPS."
+                ),
+                evidence={
+                    "url": page_url,
+                    "final_url": final_url
                 },
-                url, "Minimize unnecessary technology disclosure where practical."
-            ))
-
-        params = page.get("sensitive_parameters", [])
-        if params:
-            findings.append(make_finding(
-                "Sensitive-Looking URL Parameter",
-                "Information Disclosure", "INFO", 0, "HIGH",
-                "A discovered URL contains a parameter name that may carry "
-                "sensitive data. The scanner does not assume it contains a secret.",
-                {"parameters": params}, url,
-                "Avoid placing secrets or session identifiers in URLs."
-            ))
+                page=page.get("url"),
+                recommendation=(
+                    "Redirect HTTP requests to HTTPS and "
+                    "use HTTPS for all sensitive communication."
+                )
+            )
+        )
 
 
-def analyze_crawler_result(result):
-    """Main entry point for main.py."""
+# ============================================================
+# TLS
+# ============================================================
 
-    if not isinstance(result, dict) or not result.get("pages"):
-        return {
-            "success": False,
-            "error": "No valid crawler pages were available for analysis.",
-            "findings": []
+def add_tls(findings, crawl_result):
+    """
+    Analyze TLS information collected by the crawler.
+    """
+
+    tls = crawl_result.get(
+        "tls",
+        {}
+    )
+
+    if not tls:
+        return
+
+    version = str(
+        tls.get("version", "")
+    ).upper()
+
+    if version in (
+        "TLSV1",
+        "TLSV1.0",
+        "TLS 1.0",
+        "TLSV1.1",
+        "TLS 1.1"
+    ):
+
+        findings.append(
+            make_finding(
+                name="Outdated TLS Version",
+                category="Transport Security",
+                severity="HIGH",
+                score=30,
+                confidence="HIGH",
+                description=(
+                    "The target was observed using an outdated "
+                    "TLS protocol version."
+                ),
+                evidence={
+                    "tls_version": version
+                },
+                page=None,
+                recommendation=(
+                    "Disable outdated TLS versions and use "
+                    "modern TLS configurations."
+                )
+            )
+        )
+
+    certificate_valid = tls.get(
+        "certificate_valid"
+    )
+
+    if certificate_valid is False:
+
+        findings.append(
+            make_finding(
+                name="Invalid TLS Certificate",
+                category="Transport Security",
+                severity="HIGH",
+                score=30,
+                confidence="HIGH",
+                description=(
+                    "The TLS certificate could not be "
+                    "validated successfully."
+                ),
+                evidence={
+                    "certificate_valid": certificate_valid
+                },
+                page=None,
+                recommendation=(
+                    "Install and maintain a valid certificate "
+                    "for the website."
+                )
+            )
+        )
+
+    expired = tls.get("expired")
+    if expired is True:
+
+        findings.append(
+            make_finding(
+                name="Expired TLS Certificate",
+                category="Transport Security",
+                severity="HIGH",
+                score=30,
+                confidence="HIGH",
+                description=(
+                    "The TLS certificate has expired."
+                ),
+                evidence={
+                    "expired": True
+                },
+                page=None,
+                recommendation=(
+                    "Renew the TLS certificate before expiration."
+                )
+            )
+        )
+
+    days_remaining = tls.get(
+        "days_remaining"
+    )
+
+    if isinstance(days_remaining, (int, float)):
+
+        if 0 <= days_remaining <= 7:
+
+            findings.append(
+                make_finding(
+                    name="TLS Certificate Near Expiration",
+                    category="Transport Security",
+                    severity="MEDIUM",
+                    score=15,
+                    confidence="HIGH",
+                    description=(
+                        "The TLS certificate is close to "
+                        "expiration."
+                    ),
+                    evidence={
+                        "days_remaining": days_remaining
+                    },
+                    page=None,
+                    recommendation=(
+                        "Renew the TLS certificate before "
+                        "it expires."
+                    )
+                )
+            )
+
+        elif days_remaining <= 30:
+
+            findings.append(
+                make_finding(
+                    name="TLS Certificate Expiring Soon",
+                    category="Transport Security",
+                    severity="LOW",
+                    score=5,
+                    confidence="HIGH",
+                    description=(
+                        "The TLS certificate is approaching "
+                        "its expiration date."
+                    ),
+                    evidence={
+                        "days_remaining": days_remaining
+                    },
+                    page=None,
+                    recommendation=(
+                        "Plan certificate renewal before "
+                        "the expiration date."
+                    )
+                )
+            )
+
+
+# ============================================================
+# HSTS
+# ============================================================
+
+def add_hsts(findings, page):
+    """
+    Analyze Strict-Transport-Security.
+    """
+
+    if not is_html(page):
+        return
+
+    headers = page.get(
+        "security_headers",
+        {}
+    )
+
+    hsts = None
+
+    for key, value in headers.items():
+
+        if str(key).lower() == (
+            "strict-transport-security"
+        ):
+            hsts = value
+            break
+
+    if hsts is not None:
+
+        max_age = hsts_max_age(hsts)
+
+        if max_age == 0:
+
+            findings.append(
+                make_finding(
+                    name="HSTS Disabled",
+                    category="Transport Security",
+                    severity="MEDIUM",
+                    score=15,
+                    confidence="HIGH",
+                    description=(
+                        "The Strict-Transport-Security "
+                        "header explicitly disables HSTS."
+                    ),
+                    evidence={
+                        "strict_transport_security": hsts
+                    },
+                    page=page.get("url"),
+                    recommendation=(
+                        "Configure HSTS with an appropriate "
+                        "max-age value."
+                    )
+                )
+            )
+
+    else:
+
+        if str(
+            page.get("scheme", "")
+        ).lower() == "https":
+
+            findings.append(
+                make_finding(
+                    name="Missing HSTS",
+                    category="Transport Security",
+                    severity="LOW",
+                    score=5,
+                    confidence="HIGH",
+                    description=(
+                        "The HTTPS page does not include "
+                        "a Strict-Transport-Security header."
+                    ),
+                    evidence={
+                        "strict_transport_security": None
+                    },
+                    page=page.get("url"),
+                    recommendation=(
+                        "Consider enabling HSTS to instruct "
+                        "browsers to use HTTPS."
+                    )
+                )
+            )
+
+
+# ============================================================
+# SECURITY HEADERS
+# ============================================================
+
+def add_headers(findings, page):
+    """
+    Analyze common security-related HTTP headers.
+    """
+
+    if not is_html(page):
+        return
+
+    headers = page.get(
+        "security_headers",
+        {}
+    )
+
+    normalized = {
+        str(key).lower(): value
+        for key, value in headers.items()
+    }
+
+    csp = normalized.get(
+        "content-security-policy"
+    )
+
+    expected_headers = {
+        "content-security-policy":
+            "Content Security Policy",
+
+        "x-content-type-options":
+            "X-Content-Type-Options",
+
+        "referrer-policy":
+            "Referrer-Policy",
+
+        "permissions-policy":
+            "Permissions-Policy"
+    }
+
+    for header_name, display_name in expected_headers.items():
+
+        if not normalized.get(header_name):
+
+            findings.append(
+                make_finding(
+                    name=f"Missing {display_name}",
+                    category="Security Headers",
+                    severity="LOW",
+                    score=5,
+                    confidence="HIGH",
+                    description=(
+                        f"The {display_name} header was "
+                        "not observed on the page."
+                    ),
+                    evidence={
+                        "header": display_name
+                    },
+                    page=page.get("url"),
+                    recommendation=(
+                        f"Configure an appropriate "
+                        f"{display_name} policy."
+                    )
+                )
+            )
+
+    # X-Frame-Options is not necessarily required if
+    # CSP frame-ancestors is already present.
+
+    x_frame = normalized.get(
+        "x-frame-options"
+    )
+
+    if not x_frame and not has_frame_ancestors(csp):
+
+        findings.append(
+            make_finding(
+                name="Missing Clickjacking Protection",
+                category="Security Headers",
+                severity="LOW",
+                score=5,
+                confidence="HIGH",
+                description=(
+                    "Neither X-Frame-Options nor a CSP "
+                    "frame-ancestors directive was observed."
+                ),
+                evidence={
+                    "x-frame-options": x_frame,
+                    "frame-ancestors": False
+                },
+                page=page.get("url"),
+                recommendation=(
+                    "Configure X-Frame-Options or "
+                    "CSP frame-ancestors."
+                )
+            )
+        )
+
+
+# ============================================================
+# COOKIES
+# ============================================================
+
+def add_cookies(findings, page):
+    """
+    Analyze cookie security attributes.
+    """
+
+    cookies = page.get(
+        "cookies",
+        []
+    )
+
+    if not isinstance(cookies, list):
+        return
+
+    for cookie in cookies:
+
+        if not isinstance(cookie, dict):
+            continue
+
+        name = cookie.get(
+            "name",
+            "Unknown"
+        )
+
+        secure = cookie.get(
+            "secure"
+        )
+
+        httponly = cookie.get(
+            "httponly"
+        )
+
+        samesite = str(
+            cookie.get(
+                "samesite",
+                ""
+            )
+        ).lower()
+
+        likely_auth = auth_cookie(cookie)
+
+        if secure is False:
+
+            if likely_auth:
+
+                findings.append(
+                    make_finding(
+                        name="Authentication Cookie Missing Secure",
+                        category="Cookie Security",
+                        severity="MEDIUM",
+                        score=15,
+                        confidence="HIGH",
+                        description=(
+                            "A likely authentication or session "
+                            "cookie was observed without the "
+                            "Secure attribute."
+                        ),
+                        evidence={
+                            "cookie": name,
+                            "secure": secure
+                        },
+                        page=page.get("url"),
+                        recommendation=(
+                            "Set the Secure attribute on "
+                            "authentication and session cookies."
+                        )
+                    )
+                )
+
+            else:
+
+                findings.append(
+                    make_finding(
+                        name="Cookie Missing Secure",
+                        category="Cookie Security",
+                        severity="LOW",
+                        score=5,
+                        confidence="HIGH",
+                        description=(
+                            "A cookie was observed without "
+                            "the Secure attribute."
+                        ),
+                        evidence={
+                            "cookie": name,
+                            "secure": secure
+                        },
+                        page=page.get("url"),
+                        recommendation=(
+                            "Use the Secure attribute for "
+                            "cookies transmitted over HTTPS."
+                        )
+                    )
+                )
+
+        if (
+            httponly is False
+            and likely_auth
+        ):
+
+            findings.append(
+                make_finding(
+                    name="Authentication Cookie Missing HttpOnly",
+                    category="Cookie Security",
+                    severity="MEDIUM",
+                    score=15,
+                    confidence="MEDIUM",
+                    description=(
+                        "A likely authentication or session "
+                        "cookie was observed without HttpOnly."
+                    ),
+                    evidence={
+                        "cookie": name,
+                        "httponly": httponly
+                    },
+                    page=page.get("url"),
+                    recommendation=(
+                        "Set HttpOnly on authentication and "
+                        "session cookies where appropriate."
+                    )
+                )
+            )
+
+        if (
+            samesite == "none"
+            and secure is False
+        ):
+
+            findings.append(
+                make_finding(
+                    name="SameSite=None Cookie Without Secure",
+                    category="Cookie Security",
+                    severity="MEDIUM",
+                    score=15,
+                    confidence="HIGH",
+                    description=(
+                        "A cookie uses SameSite=None without "
+                        "the Secure attribute."
+                    ),
+                    evidence={
+                        "cookie": name,
+                        "samesite": samesite,
+                        "secure": secure
+                    },
+                    page=page.get("url"),
+                    recommendation=(
+                        "Use Secure when configuring "
+                        "SameSite=None cookies."
+                    )
+                )
+            )
+
+
+# ============================================================
+# FORMS
+# ============================================================
+
+def add_forms(findings, page):
+    """
+    Check whether password forms submit over HTTP.
+    """
+
+    forms = page.get(
+        "forms",
+        []
+    )
+
+    if not isinstance(forms, list):
+        return
+
+    for form in forms:
+
+        if not isinstance(form, dict):
+            continue
+
+        method = str(
+            form.get("method", "")
+        ).upper()
+
+        action = str(
+            form.get("action", "")
+        )
+
+        has_password = form.get(
+            "has_password"
+        )
+
+        if has_password is None:
+
+            inputs = form.get(
+                "inputs",
+                []
+            )
+
+            if isinstance(inputs, list):
+
+                has_password = any(
+                    str(
+                        item.get("type", "")
+                    ).lower() == "password"
+                    for item in inputs
+                    if isinstance(item, dict)
+                )
+
+        if not has_password:
+            continue
+
+        if action.startswith("http://"):
+
+            findings.append(
+                make_finding(
+                    name="Password Form Uses HTTP",
+                    category="Transport Security",
+                    severity="HIGH",
+                    score=30,
+                    confidence="HIGH",
+                    description=(
+                        "A password form was observed "
+                        "submitting to an HTTP URL."
+                    ),
+                    evidence={
+                        "method": method,
+                        "action": action
+                    },
+                    page=page.get("url"),
+                    recommendation=(
+                        "Submit password and authentication "
+                        "data only over HTTPS."
+                    )
+                )
+            )
+
+
+# ============================================================
+# MIXED CONTENT
+# ============================================================
+
+def add_mixed_content(findings, page):
+    """
+    Analyze mixed-content observations collected by crawler.
+    """
+
+    mixed_content = page.get(
+        "mixed_content"
+    )
+
+    if not mixed_content:
+        return
+
+    if isinstance(mixed_content, bool):
+
+        detected = mixed_content
+
+        evidence = {
+            "mixed_content": mixed_content
         }
 
-    findings = []
-    add_transport(result, findings)
-    add_hsts(result, findings)
-    add_headers(result, findings)
-    add_cookies(result, findings)
-    add_forms(result, findings)
-    add_mixed_content(result, findings)
-    add_cors(result, findings)
-    add_exposure(result, findings)
-    add_information(result, findings)
+    elif isinstance(mixed_content, dict):
 
-    score = min(100, sum(item["score"] for item in findings))
+        detected = mixed_content.get(
+            "detected",
+            False
+        )
 
-    if any(x["severity"] == "HIGH" for x in findings):
-        level = "HIGH"
-    elif any(x["severity"] == "MEDIUM" for x in findings):
-        level = "MEDIUM"
-    elif any(x["severity"] == "LOW" for x in findings):
-        level = "LOW"
+        evidence = mixed_content
+
     else:
-        level = "LOW"
+
+        detected = False
+        evidence = {
+            "mixed_content": mixed_content
+        }
+
+    if detected:
+
+        findings.append(
+            make_finding(
+                name="Mixed Content",
+                category="Transport Security",
+                severity="LOW",
+                score=5,
+                confidence="HIGH",
+                description=(
+                    "An HTTPS page was observed referencing "
+                    "HTTP resources."
+                ),
+                evidence=evidence,
+                page=page.get("url"),
+                recommendation=(
+                    "Serve page resources over HTTPS."
+                )
+            )
+        )
+
+
+# ============================================================
+# CORS
+# ============================================================
+
+def add_cors(findings, page):
+    """
+    Analyze CORS observations conservatively.
+
+    Wildcard CORS alone is informational because it can
+    be intentional for public resources.
+    """
+
+    cors = page.get(
+        "cors"
+    )
+
+    if not cors:
+        return
+
+    if isinstance(cors, dict):
+
+        allow_origin = str(
+            cors.get(
+                "allow_origin",
+                ""
+            )
+        ).strip()
+
+        allow_credentials = cors.get(
+            "allow_credentials",
+            False
+        )
+
+        if (
+            allow_origin == "*"
+            and allow_credentials is True
+        ):
+            # Browsers reject credentialed requests with
+            # wildcard origin. Do not create a false positive.
+            return
+
+        if allow_origin == "*":
+
+            findings.append(
+                make_finding(
+                    name="Wildcard CORS Policy",
+                    category="CORS",
+                    severity="INFO",
+                    score=0,
+                    confidence="HIGH",
+                    description=(
+                        "The response allows requests from "
+                        "any origin."
+                    ),
+                    evidence={
+                        "allow_origin": allow_origin,
+                        "allow_credentials":
+                            allow_credentials
+                    },
+                    page=page.get("url"),
+                    recommendation=(
+                        "If cross-origin access is not intended "
+                        "to be public, restrict allowed origins."
+                    )
+                )
+            )
+
+        elif allow_origin.lower() == "null":
+
+            findings.append(
+                make_finding(
+                    name="Null Origin Allowed",
+                    category="CORS",
+                    severity="LOW",
+                    score=5,
+                    confidence="HIGH",
+                    description=(
+                        "The response allows the null origin."
+                    ),
+                    evidence={
+                        "allow_origin": allow_origin
+                    },
+                    page=page.get("url"),
+                    recommendation=(
+                        "Allow only explicitly required origins."
+                    )
+                )
+            )
+
+
+# ============================================================
+# EXPOSURE
+# ============================================================
+
+def add_exposure(findings, page):
+    """
+    Analyze directory listing and verbose error indicators.
+    """
+
+    directory_listing = page.get(
+        "directory_listing"
+    )
+
+    if isinstance(directory_listing, dict):
+
+        detected = directory_listing.get(
+            "detected",
+            False
+        )
+
+        if detected:
+
+            findings.append(
+                make_finding(
+                    name="Directory Listing Detected",
+                    category="Information Exposure",
+                    severity="MEDIUM",
+                    score=15,
+                    confidence="HIGH",
+                    description=(
+                        "The page contains indicators "
+                        "of directory listing."
+                    ),
+                    evidence=directory_listing,
+                    page=page.get("url"),
+                    recommendation=(
+                        "Disable directory indexing unless "
+                        "it is intentionally required."
+                    )
+                )
+            )
+
+    error_indicators = page.get(
+        "error_indicators"
+    )
+
+    if isinstance(error_indicators, dict):
+
+        detected = error_indicators.get(
+            "detected",
+            False
+        )
+
+        if detected:
+
+            findings.append(
+                make_finding(
+                    name="Verbose Error Information",
+                    category="Information Exposure",
+                    severity="MEDIUM",
+                    score=15,
+                    confidence="MEDIUM",
+                    description=(
+                        "The response contains indicators "
+                        "of verbose error or stack-trace information."
+                    ),
+                    evidence=error_indicators,
+                    page=page.get("url"),
+                    recommendation=(
+                        "Disable verbose production errors and "
+                        "return generic error responses."
+                    )
+                )
+            )
+
+# ============================================================
+# INFORMATION DISCLOSURE
+# ============================================================
+
+def add_information(findings, page):
+    """
+    Record useful observations that are not automatically
+    vulnerabilities.
+    """
+
+    server = page.get(
+        "server_information"
+    )
+
+    if server:
+
+        findings.append(
+            make_finding(
+                name="Server Information Disclosed",
+                category="Information Disclosure",
+                severity="INFO",
+                score=0,
+                confidence="HIGH",
+                description=(
+                    "The server response exposes "
+                    "server or technology information."
+                ),
+                evidence={
+                    "server_information": server
+                },
+                page=page.get("url"),
+                recommendation=(
+                    "Consider minimizing unnecessary "
+                    "technology disclosure."
+                )
+            )
+        )
+
+    sensitive_parameters = page.get(
+        "sensitive_parameters"
+    )
+
+    if sensitive_parameters:
+
+        findings.append(
+            make_finding(
+                name="Sensitive-Looking URL Parameters",
+                category="Information Disclosure",
+                severity="INFO",
+                score=0,
+                confidence="HIGH",
+                description=(
+                    "A discovered URL contains parameter "
+                    "names that may represent sensitive data."
+                ),
+                evidence={
+                    "parameters": sensitive_parameters
+                },
+                page=page.get("url"),
+                recommendation=(
+                    "Avoid placing sensitive secrets or "
+                    "credentials in URLs."
+                )
+            )
+        )
+
+
+# ============================================================
+# MAIN ANALYSIS FUNCTION
+# ============================================================
+
+def analyze_crawler_result(crawler_result):
+    """
+    Convert crawler observations into structured
+    security findings.
+
+    The analyzer does NOT perform active testing.
+    It only interprets evidence already collected
+    by the passive crawler.
+    """
+
+    findings = []
+
+    if not isinstance(crawler_result, dict):
+
+        return {
+            "success": False,
+            "findings": [],
+            "error": "Invalid crawler result."
+        }
+
+    if not crawler_result.get("success"):
+
+        return {
+            "success": False,
+            "findings": [],
+            "error": crawler_result.get(
+                "error",
+                "Crawler failed."
+            )
+        }
+
+    # --------------------------------------------------------
+    # SITE-WIDE TLS ANALYSIS
+    # --------------------------------------------------------
+
+    add_tls(
+        findings,
+        crawler_result
+    )
+
+    # --------------------------------------------------------
+    # PAGE ANALYSIS
+    # --------------------------------------------------------
+
+    pages = crawler_result.get(
+        "pages",
+        {}
+    )
+
+    if isinstance(pages, dict):
+        pages = pages.values()
+
+    elif not isinstance(pages, list):
+        pages = []
+
+    for page in pages:
+
+        if not isinstance(page, dict):
+            continue
+
+        add_transport(
+            findings,
+            page
+        )
+
+        add_hsts(
+            findings,
+            page
+        )
+
+        add_headers(
+            findings,
+            page
+        )
+
+        add_cookies(
+            findings,
+            page
+        )
+
+        add_forms(
+            findings,
+            page
+        )
+
+        add_mixed_content(
+            findings,
+            page
+        )
+
+        add_cors(
+            findings,
+            page
+        )
+
+        add_exposure(
+            findings,
+            page
+        )
+
+        add_information(
+            findings,
+            page
+        )
 
     return {
         "success": True,
         "findings": findings,
-        "summary": {
-            "risk_score": score,
-            "risk_level": level,
-            "high": sum(x["severity"] == "HIGH" for x in findings),
-            "medium": sum(x["severity"] == "MEDIUM" for x in findings),
-            "low": sum(x["severity"] == "LOW" for x in findings),
-            "informational": sum(x["severity"] == "INFO" for x in findings),
-            "total_findings": len(findings)
-        },
-        "analyzed_at": datetime.now(timezone.utc).isoformat()
+        "analyzed_at":
+            datetime.now(
+                timezone.utc
+            ).isoformat()
     }
 
 
-def display_security_analysis(analysis):
-    """Temporary console output for development/testing."""
+# ============================================================
+# DISPLAY SECURITY ANALYSIS
+# ============================================================
 
-    print("\n" + "=" * 70)
-    print("                 SECURITY ANALYSIS")
+def display_security_analysis(analysis):
+    """
+    Display security findings.
+
+    Risk scoring is intentionally handled separately
+    by risk_engine.py.
+    """
+
+    print("\n")
+    print("=" * 70)
+    print("                     SECURITY ANALYSIS")
     print("=" * 70)
 
     if not analysis.get("success"):
-        print(f"[ERROR] {analysis.get('error')}")
+
+        print(
+            "\n[ERROR] Security analysis failed."
+        )
+
+        print(
+            f"Reason: {analysis.get('error')}"
+        )
+
+        print("=" * 70)
+
         return
 
-    summary = analysis["summary"]
-    print(f"\nRisk Score    : {summary['risk_score']}/100")
-    print(f"Risk Level    : {summary['risk_level']}")
-    print(f"High          : {summary['high']}")
-    print(f"Medium        : {summary['medium']}")
-    print(f"Low           : {summary['low']}")
-    print(f"Informational : {summary['informational']}")
+    findings = analysis.get(
+        "findings",
+        []
+    )
 
-    print("\nFINDINGS")
-    print("-" * 70)
+    print(
+        f"\nTotal Findings : {len(findings)}"
+    )
 
-    for number, item in enumerate(analysis["findings"], 1):
-        print(f"\n[{number}] {item['name']}")
-        print(f"    Severity   : {item['severity']}")
-        print(f"    Confidence : {item['confidence']}")
-        print(f"    Score      : {item['score']}")
-        print(f"    Category   : {item['category']}")
-        print(f"    Description: {item['description']}")
-        print(f"    Evidence   : {item['evidence']}")
-        if item["page"]:
-            print(f"    Page       : {item['page']}")
-        print(f"    Recommendation: {item['recommendation']}")
+    if not findings:
+
+        print(
+            "\nNo security findings were generated."
+        )
+
+        print("=" * 70)
+
+        return
+
+    for index, finding in enumerate(
+        findings,
+        start=1
+    ):
+
+        print("\n" + "-" * 70)
+
+        print(
+            f"Finding #{index}"
+        )
+
+        print(
+            f"Name         : "
+            f"{finding.get('name')}"
+        )
+
+        print(
+            f"Category     : "
+            f"{finding.get('category')}"
+        )
+
+        print(
+            f"Severity     : "
+            f"{finding.get('severity')}"
+        )
+
+        print(
+            f"Confidence   : "
+            f"{finding.get('confidence')}"
+        )
+
+        print(
+            f"Page         : "
+            f"{finding.get('page')}"
+        )
+
+        print(
+            f"Description  : "
+            f"{finding.get('description')}"
+        )
+
+        print(
+            f"Evidence     : "
+            f"{finding.get('evidence')}"
+        )
+
+        print(
+            f"Recommendation: "
+            f"{finding.get('recommendation')}"
+        )
+
+    print("\n" + "=" * 70)

@@ -1,449 +1,131 @@
-from input_handler import (
-    get_target_url,
-    validate_url,
-    parse_target
-)
-
-from risk_engine import classify_risk, calculate_risk
+from input_handler import get_target_url, validate_url, parse_target
 from web_checker import check_website
-
-from crawler import (
-    crawl_website,
-    display_crawl_results
-)
-
-from security_analyzer import (
-    analyze_crawler_result,
-    display_security_analysis
-)
+from crawler import crawl_website, display_crawl_results
+from security_analyzer import analyze_crawler_result, display_security_analysis
+from risk_engine import calculate_risk
 
 
-def collect_basic_observations(target, web_data):
-    """Perform basic Phase 1 security observations."""
+def display_basic_results(target, web_result):
+    print("\n" + "=" * 60)
+    print("BASIC WEBSITE CHECK")
+    print("=" * 60)
 
-    observations = []
-
-    # HTTPS check
-    if target["scheme"] == "https":
-
-        observations.append({
-            "name": "HTTPS",
-            "status": "PASS",
-            "description": "Target URL uses HTTPS.",
-            "score": 0
-        })
-
-    else:
-
-        observations.append({
-            "name": "HTTPS",
-            "status": "WARNING",
-            "description": (
-                "Target URL uses HTTP instead of HTTPS."
-            ),
-            "score": 30
-        })
-
-    # Hostname format check
-    if target["hostname"]:
-
-        observations.append({
-            "name": "Hostname Format",
-            "status": "PASS",
-            "description": (
-                "A hostname was successfully extracted "
-                "from the URL."
-            ),
-            "score": 0
-        })
-
-    # DNS resolution
-    if web_data["dns_resolved"]:
-
-        observations.append({
-            "name": "DNS Resolution",
-            "status": "PASS",
-            "description": (
-                "The hostname successfully resolved "
-                "through DNS."
-            ),
-            "score": 0
-        })
-
-    else:
-
-        observations.append({
-            "name": "DNS Resolution",
-            "status": "FAIL",
-            "description": (
-                "The hostname could not be resolved. "
-                "The target may not exist or may be "
-                "temporarily unavailable."
-            ),
-            "score": 30
-        })
-
-        return observations
-
-    # Server connection
-    if web_data["server_connection"]:
-
-        observations.append({
-            "name": "Server Connection",
-            "status": "PASS",
-            "description": (
-                "The resolved server successfully "
-                "responded to the HTTP request."
-            ),
-            "score": 0
-        })
-
-    else:
-
-        observations.append({
-            "name": "Server Connection",
-            "status": "FAIL",
-            "description": web_data["error"],
-            "score": 30
-        })
-
-        return observations
-
-    # HTTP status / page availability
-    status_code = web_data["status_code"]
-
-    if 200 <= status_code < 300:
-
-        observations.append({
-            "name": "Page Availability",
-            "status": "PASS",
-            "description": (
-                f"The requested resource returned "
-                f"HTTP {status_code}."
-            ),
-            "score": 0
-        })
-
-    elif 300 <= status_code < 400:
-
-        observations.append({
-            "name": "Page Availability",
-            "status": "REDIRECT",
-            "description": (
-                f"The server returned HTTP {status_code} "
-                "and redirected the request."
-            ),
-            "score": 0
-        })
-
-    elif 400 <= status_code < 500:
-
-        observations.append({
-            "name": "Page Availability",
-            "status": "WARNING",
-            "description": (
-                f"The server returned HTTP {status_code} "
-                f"{web_data['reason']}."
-            ),
-            "score": 10
-        })
-
-    else:
-
-        observations.append({
-            "name": "Page Availability",
-            "status": "WARNING",
-            "description": (
-                f"The server returned HTTP {status_code} "
-                f"{web_data['reason']}."
-            ),
-            "score": 15
-        })
-
-    return observations
-
-
-def display_results(
-    target,
-    observations,
-    risk,
-    web_data
-):
-    """Display the Phase 1 assessment."""
-
-    print("\n" + "=" * 55)
-    print("              WEBSENTINEL - PHASE 1")
-    print("         Passive Web Security Foundation")
-    print("=" * 55)
-
-    # -------------------------------------------------
-    # TARGET INFORMATION
-    # -------------------------------------------------
-
-    print("\nTARGET INFORMATION")
-    print("-" * 55)
-
-    print(f"URL              : {target['url']}")
-    print(f"Scheme           : {target['scheme']}")
+    print(f"Target URL       : {target['url']}")
     print(f"Hostname         : {target['hostname']}")
+    print(f"Scheme           : {target['scheme']}")
 
-    if target["port"]:
-        print(f"Port             : {target['port']}")
+    print(f"\nDNS Resolved     : {web_result.get('dns_resolved')}")
+    print(f"Server Connected : {web_result.get('server_connection')}")
+    print(f"Page Available   : {web_result.get('page_available')}")
+    print(f"Status Code      : {web_result.get('status_code')}")
+    print(f"Reason            : {web_result.get('reason')}")
+    print(f"Response Time     : {web_result.get('response_time')}")
 
-    # -------------------------------------------------
-    # BASIC OBSERVATIONS
-    # -------------------------------------------------
+    if web_result.get("redirected"):
+        print(f"Redirected To     : {web_result.get('final_url')}")
 
-    print("\nBASIC OBSERVATIONS")
-    print("-" * 55)
-
-    for observation in observations:
-
-        print(
-            f"{observation['name']:<20}: "
-            f"{observation['status']}"
-        )
-
-        print(
-            f"  {observation['description']}"
-        )
-
-    # -------------------------------------------------
-    # DNS ANALYSIS
-    # -------------------------------------------------
-
-    print("\nDNS ANALYSIS")
-    print("-" * 55)
-
-    if web_data["dns_resolved"]:
-
-        print("DNS Resolution   : SUCCESS")
-
-        print(
-            "IP Address(es)   : "
-            + ", ".join(
-                web_data["ip_addresses"]
-            )
-        )
-
-    else:
-
-        print("DNS Resolution   : FAILED")
-
-        print(
-            f"Reason           : "
-            f"{web_data['dns_error']}"
-        )
-
-    # -------------------------------------------------
-    # SERVER / HTTP ANALYSIS
-    # -------------------------------------------------
-
-    print("\nSERVER / HTTP ANALYSIS")
-    print("-" * 55)
-
-    if web_data["server_connection"]:
-
-        print("Server Connection : SUCCESS")
-
-        print(
-            f"HTTP Status       : "
-            f"{web_data['status_code']} "
-            f"{web_data['reason']}"
-        )
-
-        print(
-            f"Response Time     : "
-            f"{web_data['response_time']} seconds"
-        )
-
-        print(
-            f"Content Type      : "
-            f"{web_data['content_type']}"
-        )
-
-        print(
-            f"Server            : "
-            f"{web_data['server'] or 'Not disclosed'}"
-        )
-
-        print(
-            f"Final URL         : "
-            f"{web_data['final_url']}"
-        )
-
-        print(
-            f"Redirected        : "
-            f"{'YES' if web_data['redirected'] else 'NO'}"
-        )
-
-        if web_data["page_available"]:
-
-            print("Page Available    : YES")
-
-        else:
-
-            print("Page Available    : NO")
-
-    else:
-
-        print("Server Connection : NOT COMPLETED")
-
-        if web_data["error"]:
-
-            print(
-                f"Reason            : "
-                f"{web_data['error']}"
-            )
-
-    # -------------------------------------------------
-    # BASIC RISK SUMMARY
-    # -------------------------------------------------
-
-    print("\nRISK SUMMARY")
-    print("-" * 55)
-
-    print(
-        f"Risk Score        : "
-        f"{risk['score']}/100"
-    )
-
-    print(
-        f"Risk Level        : "
-        f"{risk['level']}"
-    )
-
-    print("\nPhase 1 assessment complete.")
-    print("=" * 55)
+    if web_result.get("error"):
+        print(f"Error             : {web_result.get('error')}")
 
 
 def main():
+    print("=" * 60)
+    print("WEBSENTINEL - WEBSITE SECURITY ANALYZER")
+    print("=" * 60)
 
-    print("=" * 55)
-    print("                  WEBSENTINEL")
-    print("           Passive Web Security Platform")
-    print("=" * 55)
-
-    # =================================================
-    # STEP 1: GET TARGET
-    # =================================================
-
+    # ---------------------------------------------------------
+    # 1. GET TARGET
+    # ---------------------------------------------------------
     url = get_target_url()
 
-    if not validate_url(url):
-
-        print("\n[ERROR] Invalid URL.")
-
-        print(
-            "Please enter a valid HTTP/HTTPS URL."
-        )
-
+    if not url:
+        print("\nNo URL entered.")
         return
 
-    # =================================================
-    # STEP 2: PARSE TARGET
-    # =================================================
+    # ---------------------------------------------------------
+    # 2. VALIDATE URL
+    # ---------------------------------------------------------
+    if not validate_url(url):
+        print("\nInvalid URL.")
+        return
 
     target = parse_target(url)
 
-    print("\nPerforming target assessment...")
+    # ---------------------------------------------------------
+    # 3. BASIC WEBSITE CHECK
+    # ---------------------------------------------------------
+    print("\nChecking target website...")
 
-    # =================================================
-    # STEP 3: BASIC WEB CHECK
-    # =================================================
-
-    web_data = check_website(
-        url,
+    web_result = check_website(
+        target["url"],
         target["hostname"]
     )
 
-    # =================================================
-    # STEP 4: BASIC OBSERVATIONS
-    # =================================================
+    display_basic_results(target, web_result)
 
-    observations = collect_basic_observations(
-        target,
-        web_data
-    )
+    # Stop if the website cannot be reached
+    if not web_result.get("page_available"):
+        print("\nWebsite cannot be analyzed because the page is unavailable.")
+        return
 
-    # =================================================
-    # STEP 5: CURRENT BASIC RISK
-    # =================================================
+    # ---------------------------------------------------------
+    # 4. CRAWLER
+    # ---------------------------------------------------------
+    print("\n" + "=" * 60)
+    print("STARTING WEBSITE CRAWLER")
+    print("=" * 60)
 
-    risk = classify_risk(
-        observations
-    )
+    crawler_result = crawl_website(target["url"])
 
-    # =================================================
-    # STEP 6: DISPLAY BASIC RESULTS
-    # =================================================
+    if not crawler_result.get("success"):
+        print("\nCrawler failed.")
+        print(crawler_result.get("error"))
+        return
 
-    display_results(
-        target,
-        observations,
-        risk,
-        web_data
-    )
+    # Display crawler observations
+    display_crawl_results(crawler_result)
 
-    # =================================================
-    # STEP 7: START HTML CRAWLER
-    # =================================================
+    # ---------------------------------------------------------
+    # 5. SECURITY ANALYZER
+    # ---------------------------------------------------------
+    print("\n" + "=" * 60)
+    print("STARTING SECURITY ANALYSIS")
+    print("=" * 60)
 
-    print("\n")
-    print("=" * 55)
-    print("Starting HTML crawler...")
-    print("=" * 55)
+    security_analysis = analyze_crawler_result(crawler_result)
 
-    crawl_result = crawl_website(
-        url,
-        max_pages=20
-    )
+    if not security_analysis.get("success"):
+        print("\nSecurity analysis failed.")
+        print(security_analysis.get("error"))
+        return
 
-    # =================================================
-    # STEP 8: DISPLAY CRAWLER RESULTS
-    # =================================================
+    display_security_analysis(security_analysis)
 
-    display_crawl_results(
-        crawl_result
-    )
+    # ---------------------------------------------------------
+    # 6. RISK ENGINE
+    # ---------------------------------------------------------
+    print("\n" + "=" * 60)
+    print("RISK ENGINE")
+    print("=" * 60)
 
-    # =================================================
-    # STEP 9: SECURITY ANALYSIS
-    # =================================================
+    findings = security_analysis.get("findings", [])
 
-    print("\n")
-    print("=" * 55)
-    print("Starting security analysis...")
-    print("=" * 55)
+    final_risk = calculate_risk(findings)
 
-    security_analysis = analyze_crawler_result(
-        crawl_result
-    )
+    print(f"\nRisk Score        : {final_risk['score']}/100")
+    print(f"Risk Level        : {final_risk['level']}")
 
-    # =================================================
-    # STEP 10: FINAL RISK ASSESSMENT
-    # =================================================
+    print("\nFinding Summary")
+    print("-" * 40)
+    print(f"High              : {final_risk['high']}")
+    print(f"Medium            : {final_risk['medium']}")
+    print(f"Low               : {final_risk['low']}")
+    print(f"Informational     : {final_risk['informational']}")
+    print(f"Unique Findings   : {final_risk['finding_count']}")
 
-    if security_analysis.get("success"):
-        final_risk = calculate_risk(
-            security_analysis["findings"]
-        )
-
-        security_analysis["summary"]["risk_score"] = final_risk["score"]
-        security_analysis["summary"]["risk_level"] = final_risk["level"]
-        security_analysis["summary"]["high"] = final_risk["high"]
-        security_analysis["summary"]["medium"] = final_risk["medium"]
-        security_analysis["summary"]["low"] = final_risk["low"]
-        security_analysis["summary"]["informational"] = final_risk["informational"]
-        security_analysis["summary"]["total_findings"] = final_risk["finding_count"]
-
-    # =================================================
-    # STEP 11: DISPLAY SECURITY FINDINGS
-    # =================================================
-
-    display_security_analysis(
-        security_analysis
-    )
+    print("\n" + "=" * 60)
+    print("WEBSENTINEL ANALYSIS COMPLETE")
+    print("=" * 60)
 
 
 if __name__ == "__main__":
