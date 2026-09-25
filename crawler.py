@@ -1,9 +1,12 @@
 import httpx
+
 from bs4 import BeautifulSoup
 from urllib.parse import urljoin, urlparse, urldefrag
 from collections import deque
 
+
 MAX_PAGES = 20
+
 
 def normalize_url(url):
     """
@@ -107,24 +110,373 @@ def extract_links(html, current_url, target_hostname):
     )
 
 
-def crawl_website(start_url, max_pages=MAX_PAGES):
+def extract_security_headers(response):
     """
-    WebSentinel Crawler V2
+    Passively collect commonly relevant security headers.
+    No active testing is performed.
+    """
 
-    Crawls multiple internal pages using a queue.
-    Discovers and records external links without crawling them.
+    header_mapping = {
+        "content-security-policy": "content_security_policy",
+        "strict-transport-security": "strict_transport_security",
+        "x-frame-options": "x_frame_options",
+        "x-content-type-options": "x_content_type_options",
+        "referrer-policy": "referrer_policy",
+        "permissions-policy": "permissions_policy"
+    }
+
+    security_headers = {}
+
+    for header_name, field_name in header_mapping.items():
+
+        value = response.headers.get(
+            header_name
+        )
+
+        security_headers[field_name] = {
+            "present": value is not None,
+            "value": value
+        }
+
+    return security_headers
+
+
+def extract_cookies(response):
+    """
+    Passively collect cookie security attributes
+    from Set-Cookie response headers.
+    """
+
+    cookies = []
+
+    set_cookie_headers = response.headers.get_list(
+        "set-cookie"
+    )
+
+    for cookie_header in set_cookie_headers:
+
+        parts = [
+            part.strip()
+            for part in cookie_header.split(";")
+        ]
+
+        if not parts:
+            continue
+
+        name_value = parts[0]
+
+        if "=" not in name_value:
+            continue
+
+        cookie_name = name_value.split(
+            "=",
+            1
+        )[0].strip()
+
+        cookie = {
+            "name": cookie_name,
+            "secure": False,
+            "httponly": False,
+            "samesite": None
+        }
+
+        for attribute in parts[1:]:
+
+            attribute_lower = attribute.lower()
+
+            if attribute_lower == "secure":
+                cookie["secure"] = True
+
+            elif attribute_lower == "httponly":
+                cookie["httponly"] = True
+
+            elif attribute_lower.startswith(
+                "samesite="
+            ):
+                cookie["samesite"] = (
+                    attribute.split(
+                        "=",
+                        1
+                    )[1].strip()
+                )
+
+        cookies.append(cookie)
+
+    return cookies
+
+
+def extract_forms(html, current_url):
+    """
+    Passively inspect forms present in the HTML.
+    Forms are never submitted.
+    """
+
+    soup = BeautifulSoup(
+        html,
+        "html.parser"
+    )
+
+    forms = []
+
+    for form in soup.find_all("form"):
+
+        method = (
+            form.get("method", "GET")
+            .upper()
+        )
+
+        action = form.get(
+            "action",
+            ""
+        ).strip()
+
+        if action:
+            action = urljoin(
+                current_url,
+                action
+            )
+
+        inputs = []
+
+        for field in form.find_all(
+            ["input", "textarea", "select"]
+        ):
+
+            input_type = (
+                field.get(
+                    "type",
+                    "text"
+                )
+                if field.name == "input"
+                else field.name
+            )
+
+            inputs.append({
+                "name": field.get("name"),
+                "type": input_type
+            })
+
+        password_fields = [
+            field
+            for field in inputs
+            if str(
+                field.get("type", "")
+            ).lower() == "password"
+        ]
+
+        forms.append({
+            "method": method,
+            "action": action,
+            "inputs": inputs,
+            "password_fields": len(
+                password_fields
+            )
+        })
+
+    return forms
+
+
+def extract_scripts(html, current_url, target_hostname):
+    """
+    Passively inspect script elements and classify
+    them as internal or external.
+    """
+
+    soup = BeautifulSoup(
+        html,
+        "html.parser"
+    )
+
+    scripts = []
+
+    for script in soup.find_all("script"):
+
+        src = script.get("src")
+
+        if not src:
+            scripts.append({
+                "src": None,
+                "type": "inline",
+                "internal": None
+            })
+
+            continue
+
+        absolute_url = urljoin(
+            current_url,
+            src
+        )
+
+        absolute_url, _ = urldefrag(
+            absolute_url
+        )
+
+        parsed_url = urlparse(
+            absolute_url
+        )
+
+        scripts.append({
+            "src": absolute_url,
+            "type": "external",
+            "internal": (
+                parsed_url.hostname
+                == target_hostname
+            )
+        })
+
+    return scripts
+
+
+def extract_mixed_content(html, current_url):
+    """
+    Passively identify HTTP resources referenced
+    by an HTTPS page.
+    """
+
+    parsed_current = urlparse(
+        current_url
+    )
+
+    if parsed_current.scheme != "https":
+        return []
+
+    soup = BeautifulSoup(
+        html,
+        "html.parser"
+    )
+
+    insecure_resources = []
+
+    resource_attributes = {
+        "script": "src",
+        "img": "src",
+        "iframe": "src",
+        "audio": "src",
+        "video": "src",
+        "source": "src",
+        "link": "href"
+    }
+
+    for tag_name, attribute in resource_attributes.items():
+
+        for tag in soup.find_all(
+            tag_name
+        ):
+
+            resource = tag.get(
+                attribute
+            )
+
+            if not resource:
+                continue
+
+            absolute_url = urljoin(
+                current_url,
+                resource
+            )
+
+            parsed_resource = urlparse(
+                absolute_url
+            )
+
+            if parsed_resource.scheme == "http":
+
+                insecure_resources.append(
+                    absolute_url
+                )
+
+    return sorted(
+        set(insecure_resources)
+    )
+
+
+def analyze_page_security(
+    html,
+    response,
+    current_url,
+    target_hostname
+):
+    """
+    Collect passive security evidence from
+    one HTTP response and its HTML.
+    """
+
+    return {
+        "security_headers":
+            extract_security_headers(
+                response
+            ),
+
+        "cookies":
+            extract_cookies(
+                response
+            ),
+
+        "forms":
+            extract_forms(
+                html,
+                current_url
+            ),
+
+        "scripts":
+            extract_scripts(
+                html,
+                current_url,
+                target_hostname
+            ),
+
+        "mixed_content":
+            extract_mixed_content(
+                html,
+                current_url
+            )
+    }
+
+
+def crawl_website(
+    start_url,
+    max_pages=MAX_PAGES
+):
+    """
+    WebSentinel V4.1
+
+    Multi-page static HTML crawler with
+    passive security evidence collection.
+
+    The crawler:
+    - Crawls internal pages only
+    - Records external links
+    - Collects HTTP metadata
+    - Collects security headers
+    - Collects cookie attributes
+    - Collects forms
+    - Collects scripts
+    - Detects passive mixed-content references
+
+    No forms are submitted.
+    No payloads are sent.
+    No exploitation is performed.
     """
 
     result = {
         "success": False,
         "start_url": start_url,
         "final_start_url": None,
+
         "pages": {},
+
+        "website_graph": {},
+
         "visited": set(),
+
         "external_links": set(),
+
         "failed_pages": {},
+
         "total_anchor_tags": 0,
+
         "max_pages": max_pages,
+
         "error": None
     }
 
@@ -132,10 +484,17 @@ def crawl_website(start_url, max_pages=MAX_PAGES):
         start_url
     )
 
-    # Queue stores pages waiting to be crawled
     queue = deque([
         start_url
     ])
+
+    parent_map = {
+        start_url: None
+    }
+
+    depth_map = {
+        start_url: 0
+    }
 
     try:
 
@@ -144,13 +503,14 @@ def crawl_website(start_url, max_pages=MAX_PAGES):
             timeout=10.0,
             headers={
                 "User-Agent":
-                "WebSentinel/1.0 Educational Security Crawler"
+                    "WebSentinel/1.0 Educational Security Crawler"
             }
         ) as client:
 
             while (
                 queue
-                and len(result["visited"]) < max_pages
+                and len(result["visited"])
+                < max_pages
             ):
 
                 current_url = queue.popleft()
@@ -187,7 +547,8 @@ def crawl_website(start_url, max_pages=MAX_PAGES):
                     # Store final start URL
                     if (
                         current_url == start_url
-                        and result["final_start_url"] is None
+                        and result["final_start_url"]
+                        is None
                     ):
                         result[
                             "final_start_url"
@@ -200,32 +561,68 @@ def crawl_website(start_url, max_pages=MAX_PAGES):
 
                     page_data = {
                         "url": current_url,
-                        "final_url": final_url,
-                        "status_code": response.status_code,
-                        "reason": response.reason_phrase,
-                        "content_type": content_type,
-                        "html_size": len(
-                            response.text
-                        ),
-                        "anchor_tags_found": 0,
-                        "internal_links": [],
-                        "external_links": []
+
+                        "parent_url": parent_map.get(current_url),
+
+                        "depth": depth_map.get(current_url, 0),
+
+                        "final_url":
+                            final_url,
+
+                        "status_code":
+                            response.status_code,
+
+                        "reason":
+                            response.reason_phrase,
+
+                        "content_type":
+                            content_type,
+
+                        "server": response.headers.get("server"),
+
+                        "html_size":
+                            len(response.text),
+
+                        "anchor_tags_found":
+                            0,
+
+                        "internal_links":
+                            [],
+
+                        "external_links":
+                            [],
+
+                        # Passive security evidence
+                        "security_headers":
+                            {},
+
+                        "cookies":
+                            [],
+
+                        "forms":
+                            [],
+
+                        "scripts":
+                            [],
+
+                        "mixed_content":
+                            []
                     }
 
                     # HTTP error
                     if response.status_code >= 400:
 
-                        result["failed_pages"][
-                            current_url
-                        ] = (
+                        result[
+                            "failed_pages"
+                        ][current_url] = (
                             f"HTTP "
                             f"{response.status_code} "
                             f"{response.reason_phrase}"
                         )
 
-                        result["pages"][
-                            current_url
-                        ] = page_data
+                        result[
+                            "pages"
+                        ][current_url] = page_data
 
                         print(
                             f"    FAILED: HTTP "
@@ -247,9 +644,9 @@ def crawl_website(start_url, max_pages=MAX_PAGES):
                             "Non-HTML response"
                         )
 
-                        result["pages"][
-                            current_url
-                        ] = page_data
+                        result[
+                            "pages"
+                        ][current_url] = page_data
 
                         print(
                             "    SKIPPED: "
@@ -263,6 +660,10 @@ def crawl_website(start_url, max_pages=MAX_PAGES):
                         final_url
                     ).hostname
 
+                    # -----------------------------------------
+                    # LINK EXTRACTION
+                    # -----------------------------------------
+
                     (
                         internal_links,
                         external_links,
@@ -273,7 +674,6 @@ def crawl_website(start_url, max_pages=MAX_PAGES):
                         target_hostname
                     )
 
-                    # Store page information
                     page_data[
                         "anchor_tags_found"
                     ] = anchor_count
@@ -286,6 +686,57 @@ def crawl_website(start_url, max_pages=MAX_PAGES):
                         "external_links"
                     ] = external_links
 
+                    # -----------------------------------------
+                    # SECURITY EVIDENCE COLLECTION
+                    # -----------------------------------------
+
+                    security_data = (
+                        analyze_page_security(
+                            response.text,
+                            response,
+                            final_url,
+                            target_hostname
+                        )
+                    )
+
+                    page_data[
+                        "security_headers"
+                    ] = security_data[
+                        "security_headers"
+                    ]
+
+                    page_data[
+                        "cookies"
+                    ] = security_data[
+                        "cookies"
+                    ]
+
+                    page_data[
+                        "forms"
+                    ] = security_data[
+                        "forms"
+                    ]
+
+                    page_data[
+                        "scripts"
+                    ] = security_data[
+                        "scripts"
+                    ]
+
+                    page_data[
+                        "mixed_content"
+                    ] = security_data[
+                        "mixed_content"
+                    ]
+
+                    # Website graph
+                    result["website_graph"][current_url] = {
+                        "parent": parent_map.get(current_url),
+                        "depth": depth_map.get(current_url, 0),
+                        "children": internal_links
+                    }
+
+                    # Store page information
                     result[
                         "pages"
                     ][current_url] = page_data
@@ -309,18 +760,13 @@ def crawl_website(start_url, max_pages=MAX_PAGES):
                             not in result["visited"]
                             and link not in queue
                         ):
-
-                            if (
-                                len(
-                                    result["visited"]
-                                )
-                                + len(queue)
-                                < max_pages
-                            ):
-
-                                queue.append(
-                                    link
-                                )
+                            parent_map[link] = current_url
+                            depth_map[link] = (
+                                depth_map.get(current_url, 0) + 1
+                            )
+                            queue.append(
+                                link
+                            )
 
                     print(
                         f"    SUCCESS: "
@@ -330,181 +776,104 @@ def crawl_website(start_url, max_pages=MAX_PAGES):
                         f"external links"
                     )
 
-                except httpx.RequestError as error:
+                    print(
+                        f"    Security Evidence: "
+                        f"{len(security_data['security_headers'])} "
+                        f"headers, "
+                        f"{len(security_data['cookies'])} "
+                        f"cookies, "
+                        f"{len(security_data['forms'])} "
+                        f"forms, "
+                        f"{len(security_data['scripts'])} "
+                        f"scripts"
+                    )
 
-                    result["failed_pages"][
-                        current_url
-                    ] = str(error)
+                    if security_data[
+                        "mixed_content"
+                    ]:
+
+                        print(
+                            f"    Mixed Content: "
+                            f"{len(security_data['mixed_content'])} "
+                            f"resources"
+                        )
+
+                except httpx.TimeoutException:
+
+                    result[
+                        "failed_pages"
+                    ][current_url] = (
+                        "Request timed out."
+                    )
 
                     print(
-                        "    FAILED: "
+                        "    FAILED: Request timed out."
+                    )
+
+                except httpx.RequestError as error:
+
+                    result[
+                        "failed_pages"
+                    ][current_url] = (
+                        f"HTTP request error: "
                         f"{error}"
                     )
 
-        # Crawl is considered successful
-        # if at least one page was processed
-        if result["pages"]:
+                    print(
+                        f"    FAILED: "
+                        f"HTTP request error: "
+                        f"{error}"
+                    )
 
-            result["success"] = True
+                except Exception as error:
 
-        return result
+                    result[
+                        "failed_pages"
+                    ][current_url] = (
+                        f"Unexpected error: "
+                        f"{error}"
+                    )
+
+                    print(
+                        f"    FAILED: "
+                        f"Unexpected error: "
+                        f"{error}"
+                    )
+
+        result["success"] = True
 
     except Exception as error:
 
-        result["error"] = str(error)
+        result["error"] = (
+            f"Crawler error: {error}"
+        )
 
-        return result
+    return result
 
 
 def display_crawl_results(result):
     """
-    Display the complete multi-page crawl summary.
+    Display crawler results in the terminal.
     """
 
-    print("\n" + "=" * 65)
-    print("              WEBSENTINEL - CRAWLER V2")
-    print("           Multi-Page Static Web Crawling")
-    print("=" * 65)
+    print("\n" + "=" * 60)
+    print("       WEBSENTINEL - CRAWLER V4.1")
+    print("   Multi-Page Static Web Crawling")
+    print("   + Passive Security Evidence")
+    print("=" * 60)
 
-    print("\nTARGET INFORMATION")
-    print("-" * 65)
+    print("\nCRAWL INFORMATION")
+    print("-" * 60)
 
     print(
-        f"Starting URL       : "
+        f"Start URL          : "
         f"{result['start_url']}"
     )
 
     print(
-        f"Pages Limit        : "
-        f"{result['max_pages']}"
+        f"Final Start URL    : "
+        f"{result['final_start_url']}"
     )
-
-    if result["final_start_url"]:
-
-        print(
-            f"Final Start URL    : "
-            f"{result['final_start_url']}"
-        )
-
-    # Fatal error
-    if result["error"]:
-
-        print("\nCRAWL STATUS")
-        print("-" * 65)
-
-        print("Status             : FAILED")
-        print(
-            f"Reason             : "
-            f"{result['error']}"
-        )
-
-        print("=" * 65)
-
-        return
-
-    # Crawled pages
-    print("\nCRAWLED PAGES")
-    print("-" * 65)
-
-    if result["pages"]:
-
-        for index, (
-            url,
-            page
-        ) in enumerate(
-            result["pages"].items(),
-            start=1
-        ):
-
-            print(
-                f"\n[{index}] {url}"
-            )
-
-            print(
-                f"    HTTP Status    : "
-                f"{page['status_code']} "
-                f"{page['reason']}"
-            )
-
-            print(
-                f"    Content Type   : "
-                f"{page['content_type']}"
-            )
-
-            print(
-                f"    Response Size  : "
-                f"{page['html_size']} characters"
-            )
-
-            print(
-                f"    <a> Tags       : "
-                f"{page['anchor_tags_found']}"
-            )
-
-            print(
-                f"    Internal Links : "
-                f"{len(page['internal_links'])}"
-            )
-
-            print(
-                f"    External Links : "
-                f"{len(page['external_links'])}"
-            )
-
-    else:
-
-        print(
-            "No pages were successfully processed."
-        )
-
-    # Failed pages
-    print("\nFAILED PAGES")
-    print("-" * 65)
-
-    if result["failed_pages"]:
-
-        for url, reason in (
-            result["failed_pages"].items()
-        ):
-
-            print(
-                f"- {url}"
-            )
-
-            print(
-                f"  Reason: {reason}"
-            )
-
-    else:
-
-        print(
-            "No failed pages."
-        )
-
-    # External links
-    print("\nEXTERNAL LINKS DISCOVERED")
-    print("-" * 65)
-
-    if result["external_links"]:
-
-        for index, link in enumerate(
-            sorted(result["external_links"]),
-            start=1
-        ):
-
-            print(
-                f"{index}. {link}"
-            )
-
-    else:
-
-        print(
-            "No external links discovered."
-        )
-
-    # Summary
-    print("\nCRAWL SUMMARY")
-    print("-" * 65)
 
     print(
         f"Pages Visited      : "
@@ -532,29 +901,156 @@ def display_crawl_results(result):
     )
 
     print(
-        "\nCrawler Scope      : "
-        "Multi-Page Static HTML Analysis"
+        f"Maximum Pages      : "
+        f"{result['max_pages']}"
     )
 
-    print("=" * 65)
+    print("\nPAGE DETAILS")
+    print("-" * 60)
 
+    for index, (
+        url,
+        page
+    ) in enumerate(
+        result["pages"].items(),
+        start=1
+    ):
 
-if __name__ == "__main__":
+        print(
+            f"\n[{index}] {url}"
+        )
 
-    print("=" * 65)
-    print("                WEBSENTINEL CRAWLER V2")
-    print("             Multi-Page Link Discovery")
-    print("=" * 65)
+        print(
+            f"    Final URL      : "
+            f"{page['final_url']}"
+        )
 
-    target_url = input(
-        "\nEnter website URL: "
-    ).strip()
+        print(
+            f"    Status         : "
+            f"{page['status_code']} "
+            f"{page['reason']}"
+        )
 
-    crawl_result = crawl_website(
-        target_url,
-        MAX_PAGES
+        print(
+            f"    Content Type   : "
+            f"{page['content_type']}"
+        )
+
+        print(
+            f"    HTML Size      : "
+            f"{page['html_size']} bytes"
+        )
+
+        print(
+            f"    Anchor Tags    : "
+            f"{page['anchor_tags_found']}"
+        )
+
+        print(
+            f"    Internal Links : "
+            f"{len(page['internal_links'])}"
+        )
+
+        print(
+            f"    External Links : "
+            f"{len(page['external_links'])}"
+        )
+
+        print(
+            f"    Forms          : "
+            f"{len(page['forms'])}"
+        )
+
+        print(
+            f"    Scripts        : "
+            f"{len(page['scripts'])}"
+        )
+
+        print(
+            f"    Cookies        : "
+            f"{len(page['cookies'])}"
+        )
+
+        mixed_count = len(
+            page.get(
+                "mixed_content",
+                []
+            )
+        )
+
+        print(
+            f"    Mixed Content  : "
+            f"{mixed_count}"
+        )
+
+    print("\nEXTERNAL LINKS DISCOVERED")
+    print("-" * 60)
+
+    if result["external_links"]:
+
+        for link in sorted(
+            result["external_links"]
+        ):
+
+            print(
+                f"  - {link}"
+            )
+
+    else:
+
+        print(
+            "No external links discovered."
+        )
+
+    print("\nFAILED PAGES")
+    print("-" * 60)
+
+    if result["failed_pages"]:
+
+        for url, reason in (
+            result["failed_pages"].items()
+        ):
+
+            print(
+                f"  - {url}"
+            )
+
+            print(
+                f"    {reason}"
+            )
+
+    else:
+
+        print(
+            "No failed pages."
+        )
+
+    print("\nCRAWL SUMMARY")
+    print("-" * 60)
+
+    print(
+        f"Pages Visited      : "
+        f"{len(result['visited'])}"
     )
 
-    display_crawl_results(
-        crawl_result
+    print(
+        f"Pages Processed    : "
+        f"{len(result['pages'])}"
     )
+
+    print(
+        f"Failed Pages       : "
+        f"{len(result['failed_pages'])}"
+    )
+
+    print(
+        f"External Links     : "
+        f"{len(result['external_links'])}"
+    )
+
+    print(
+        f"Total <a> Tags     : "
+        f"{result['total_anchor_tags']}"
+    )
+
+    print("=" * 60)
