@@ -1,3 +1,8 @@
+"""
+WebSentinel Security Analyzer
+Passive analysis of evidence already collected by crawler.py.
+No form submission, payload injection, or path probing.
+"""
 
 from datetime import datetime, timezone
 
@@ -154,7 +159,11 @@ def add_headers(result, findings):
                 f"{label} is absent on {len(missing)} of {len(pages)} "
                 "HTML pages. This is a defense-in-depth weakness, not "
                 "proof of a vulnerability.",
-                {"missing": len(missing), "analyzed": len(pages)},
+                {
+                    "missing": len(missing),
+                    "analyzed": len(pages),
+                    "pages": missing
+                },
                 recommendation=f"Review whether {label} should be enabled."
             ))
 
@@ -215,12 +224,25 @@ def add_forms(result, findings):
 def add_mixed_content(result, findings):
     for url, page in result.get("pages", {}).items():
         mixed = page.get("mixed_content", {})
-        if mixed.get("detected"):
+
+        # Support both crawler formats:
+        # {"detected": bool, "resources": [...]} or a list of resources.
+        if isinstance(mixed, dict):
+            detected = mixed.get("detected", False)
+            resources = mixed.get("resources", [])
+        elif isinstance(mixed, list):
+            resources = mixed
+            detected = bool(resources)
+        else:
+            resources = []
+            detected = False
+
+        if detected:
             findings.append(make_finding(
                 "Mixed Content Reference", "Transport Security",
                 "LOW", 5, "HIGH",
                 "An HTTPS page references one or more HTTP resources.",
-                {"resources": mixed.get("resources", [])[:20]},
+                {"resources": resources[:20]},
                 url, "Serve referenced resources over HTTPS."
             ))
 
